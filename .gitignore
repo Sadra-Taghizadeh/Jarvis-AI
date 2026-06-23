@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Build output
+dist/
+release/
+*.exe
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Memory (user data)
+backend/memory/
+
+# Screenshots
+screenshot.png
+*.png.tmp
+
+# Logs
+*.log
+npm-debug.log*
