@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "lint": "eslint src --ext .vue,.js,.jsx,.cjs,.mjs",
+    "lint:fix": "eslint src --ext .vue,.js,.jsx,.cjs,.mjs --fix",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "vite build && electron-builder",
     "electron:build:win": "vite build && electron-builder --win",
@@ -22,6 +24,7 @@
     "files": [
       "dist/**/*",
       "electron.js",
+      "preload.js",
       "src/assets/**/*"
     ],
     "win": {
@@ -54,7 +57,6 @@
     "concurrently": "^8.2.0",
     "electron": "^30.0.0",
     "electron-builder": "^24.0.0",
-    "electron-packager": "^17.1.2",
     "vite": "^5.4.0",
     "wait-on": "^7.2.0"
   }

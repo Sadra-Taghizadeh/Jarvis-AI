@@ -1,5 +1,5 @@
 <template>
-  <div class="msg-row" :class="[message.role, { 'is-bg': message.isBackground }]">
+  <div class="msg-row" :class="[message.role, { 'is-bg': message.isBackground }]" @mouseenter="showActions = true" @mouseleave="showActions = false">
     <div class="msg-avatar" :class="message.role">
       <template v-if="message.role === 'user'">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -36,24 +36,59 @@
     <div class="msg-body">
       <div class="msg-meta" v-if="message.role !== 'user'">
         <span class="msg-sender">{{ senderName }}</span>
-        <span class="msg-time">{{ formatTime(message.timestamp) }}</span>
+        <span class="msg-time">{{ relativeTime }}</span>
+        <div class="msg-actions" v-if="showActions">
+          <button class="action-btn" @click="copyMessage" :title="copied ? 'Copied!' : 'Copy'">
+            <svg v-if="!copied" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+          </button>
+          <button class="action-btn delete" @click="$emit('delete', message.timestamp.getTime())" title="Delete">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            </svg>
+          </button>
+        </div>
       </div>
       <div class="msg-bubble" :class="message.role">
         <div class="msg-text" v-html="renderedContent"></div>
       </div>
       <div class="msg-meta msg-meta-user" v-if="message.role === 'user'">
-        <span class="msg-time">{{ formatTime(message.timestamp) }}</span>
+        <span class="msg-time">{{ relativeTime }}</span>
+        <div class="msg-actions" v-if="showActions">
+          <button class="action-btn" @click="copyMessage" :title="copied ? 'Copied!' : 'Copy'">
+            <svg v-if="!copied" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+          </button>
+          <button class="action-btn delete" @click="$emit('delete', message.timestamp.getTime())" title="Delete">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 const props = defineProps({
   message: Object
 })
+
+defineEmits(['delete'])
+
+const showActions = ref(false)
+const copied = ref(false)
 
 const senderName = computed(() => {
   const names = {
@@ -68,15 +103,40 @@ const senderName = computed(() => {
 
 const renderedContent = computed(() => {
   let text = props.message.content
+  text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  text = text.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="lang-$1">$2</code></pre>')
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>')
   text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
   text = text.replace(/\*(.*?)\*/g, '<em>$1</em>')
-  text = text.replace(/`(.*?)`/g, '<code>$1</code>')
+  text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>')
+  text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>')
+  text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>')
+  text = text.replace(/^- (.+)$/gm, '<li>$1</li>')
+  text = text.replace(/(<li>.*<\/li>\n?)+/g, (match) => `<ul>${match}</ul>`)
   text = text.replace(/\n/g, '<br>')
   return text
 })
 
-function formatTime(date) {
-  return new Date(date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+const relativeTime = computed(() => {
+  const now = Date.now()
+  const msgTime = new Date(props.message.timestamp).getTime()
+  const diff = now - msgTime
+
+  if (diff < 60000) return 'just now'
+  if (diff < 3600000) return `${Math.floor(diff / 60000)} min ago`
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)} hours ago`
+  if (diff < 604800000) return `${Math.floor(diff / 86400000)} days ago`
+  return new Date(props.message.timestamp).toLocaleDateString()
+})
+
+async function copyMessage() {
+  try {
+    await navigator.clipboard.writeText(props.message.content)
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 2000)
+  } catch (e) {
+    console.error('Copy failed:', e)
+  }
 }
 </script>
 
@@ -171,6 +231,41 @@ function formatTime(date) {
   color: #444;
 }
 
+.msg-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  animation: fadeIn 0.15s ease forwards;
+}
+
+@keyframes fadeIn {
+  to { opacity: 1; }
+}
+
+.action-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #666;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.action-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.action-btn.delete:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
 .msg-bubble {
   padding: 10px 14px;
   border-radius: 14px;
@@ -226,5 +321,28 @@ function formatTime(date) {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-size: 12.5px;
   color: #00d4ff;
+}
+.msg-text :deep(pre) {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.msg-text :deep(pre code) {
+  background: none;
+  padding: 0;
+  color: #e0e0e0;
+}
+.msg-text :deep(h1), .msg-text :deep(h2), .msg-text :deep(h3) {
+  color: #fff;
+  margin: 8px 0 4px;
+}
+.msg-text :deep(ul) {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+.msg-text :deep(li) {
+  margin: 2px 0;
 }
 </style>

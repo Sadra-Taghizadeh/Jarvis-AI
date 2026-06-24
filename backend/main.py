@@ -1,18 +1,44 @@
 import asyncio
 import json
+import os
+import signal
+import sys
 import websockets
 from ai_brain import AIBrain
 from computer import ComputerController
 from memory import Memory
 from screen import ScreenAnalyzer
+from speech import SpeechRecognizer
+from startup import run_checks
+
+if not run_checks():
+    print("[STARTUP] Exiting due to failed checks")
+    sys.exit(1)
 
 brain = AIBrain()
 computer = ComputerController()
 memory = Memory()
 screen = ScreenAnalyzer()
+speech = SpeechRecognizer()
 
 connected_clients = set()
 background_tasks = {}
+
+PID_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend.pid")
+
+def write_pid():
+    try:
+        with open(PID_PATH, "w") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
+def remove_pid():
+    try:
+        if os.path.exists(PID_PATH):
+            os.remove(PID_PATH)
+    except Exception:
+        pass
 
 async def notify_user(message, msg_type="response"):
     for ws in connected_clients:
@@ -22,7 +48,7 @@ async def notify_user(message, msg_type="response"):
                 "message": message,
                 "background": True
             }))
-        except:
+        except Exception:
             pass
 
 async def handle_client(websocket):
@@ -43,12 +69,45 @@ async def handle_client(websocket):
         print(f"[DISCONNECT] Client removed. Total: {len(connected_clients)}")
 
 async def process_message(websocket, data):
-    if data.get("type") != "chat":
+    msg_type = data.get("type")
+    if msg_type not in ("chat", "history_request", "clear_history", "audio_transcribe"):
+        return
+
+    if msg_type == "audio_transcribe":
+        audio_data = data.get("audio", "")
+        format = data.get("format", "webm")
+        if not audio_data:
+            await websocket.send(json.dumps({"type": "error", "message": "No audio data"}))
+            return
+        result = speech.transcribe(audio_data, format)
+        await websocket.send(json.dumps({"type": "transcription", "text": result.get("text", ""), "success": result.get("success", False)}))
+        return
+
+    if msg_type == "history_request":
+        limit = min(data.get("limit", 50), 200)
+        history = memory.get_recent_conversations(limit)
+        await websocket.send(json.dumps({"type": "history", "messages": history}))
+        return
+
+    if msg_type == "clear_history":
+        memory.clear_conversations()
+        await websocket.send(json.dumps({"type": "response", "message": "Chat history cleared."}))
         return
 
     content = data.get("content", "")
+    if not content or not isinstance(content, str):
+        return
+
+    content = content[:10000]
+    use_stream = data.get("stream", True)
     print(f"[AI] User: {content[:200]}")
 
+    if use_stream:
+        await process_message_stream(websocket, content)
+    else:
+        await process_message_sync(websocket, content)
+
+async def process_message_sync(websocket, content):
     try:
         response = brain.chat(content, memory)
     except Exception as e:
@@ -78,6 +137,44 @@ async def process_message(websocket, data):
             }))
         else:
             await run_foreground_task(websocket, action, content)
+
+async def process_message_stream(websocket, content):
+    msg_id = str(id(content))
+    await websocket.send(json.dumps({"type": "stream_start", "id": msg_id}))
+
+    try:
+        for chunk in brain.chat_stream(content, memory):
+            if chunk["type"] == "chunk":
+                await websocket.send(json.dumps({"type": "stream_chunk", "id": msg_id, "delta": chunk["content"]}))
+            elif chunk["type"] == "done":
+                result = chunk["result"]
+                print(f"[AI] Stream done, type: {result.get('type')}")
+
+                if result["type"] == "chat":
+                    msg = result.get("message", "") or "I'm not sure how to help. Could you rephrase?"
+                    await websocket.send(json.dumps({"type": "stream_end", "id": msg_id, "message": msg}))
+                    memory.save_conversation(content, msg)
+
+                elif result["type"] == "error":
+                    await websocket.send(json.dumps({"type": "stream_end", "id": msg_id, "error": result.get("message", "Unknown error")}))
+
+                elif result["type"] == "action":
+                    action = result["action"]
+                    is_long = is_long_task(action)
+
+                    if is_long:
+                        asyncio.create_task(run_background_task(action, content))
+                        await websocket.send(json.dumps({"type": "stream_end", "id": msg_id, "message": "Working on it... I'll notify you when done."}))
+                    else:
+                        await websocket.send(json.dumps({"type": "stream_end", "id": msg_id, "action": action}))
+
+            elif chunk["type"] == "error":
+                await websocket.send(json.dumps({"type": "stream_end", "id": msg_id, "error": chunk["message"]}))
+                return
+
+    except Exception as e:
+        print(f"[AI] Stream error: {e}")
+        await websocket.send(json.dumps({"type": "stream_end", "id": msg_id, "error": str(e)}))
 
 def is_long_task(action):
     action_type = action.get("action", "")
@@ -251,7 +348,18 @@ async def check_reminders():
 
 async def main():
     host = "localhost"
-    port = 8765
+    port = int(os.getenv("WS_PORT", 8765))
+
+    write_pid()
+
+    def shutdown_handler(sig, frame):
+        print("\n[SERVER] Shutting down...")
+        remove_pid()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
+
     print(f"========================================")
     print(f"  Jarvis Backend")
     print(f"  ws://{host}:{port}")
@@ -261,7 +369,7 @@ async def main():
 
     asyncio.create_task(check_reminders())
 
-    async with websockets.serve(handle_client, host, port):
+    async with websockets.serve(handle_client, host, port, max_size=10240):
         print(f"[SERVER] Listening")
         await asyncio.Future()
 

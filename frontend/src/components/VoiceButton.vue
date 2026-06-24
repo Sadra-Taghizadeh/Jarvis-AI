@@ -2,8 +2,11 @@
   <button
     class="voice-btn"
     :class="{ listening: isListening }"
-    @click="toggleListening"
-    :title="isListening ? 'Stop listening' : 'Voice input'"
+    @mousedown="startRecording"
+    @mouseup="stopRecording"
+    @mouseleave="stopRecording"
+    @click.prevent
+    :title="isListening ? 'Stop recording' : 'Hold to talk'"
   >
     <div class="voice-ring" v-if="isListening"></div>
     <svg v-if="!isListening" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -22,37 +25,71 @@
 import { ref, onUnmounted } from 'vue'
 
 const props = defineProps({ isListening: Boolean })
-const emit = defineEmits(['voice-input'])
-let recognition = null
+const emit = defineEmits(['voice-input', 'update:isListening'])
 
-function toggleListening() {
-  props.isListening ? stopListening() : startListening()
-}
+let mediaRecorder = null
+let audioChunks = []
 
-function startListening() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition
-  if (!SR) { alert('Speech recognition not supported'); return }
+function startRecording() {
+  if (props.isListening) return
 
-  recognition = new SR()
-  recognition.continuous = false
-  recognition.interimResults = false
-  recognition.lang = 'en-US'
-
-  recognition.onresult = (e) => {
-    emit('voice-input', e.results[0][0].transcript)
-    stopListening()
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    console.error('MediaRecorder not supported')
+    return
   }
-  recognition.onerror = () => stopListening()
-  recognition.onend = () => stopListening()
-  recognition.start()
+
+  navigator.mediaDevices.getUserMedia({ audio: true })
+    .then(stream => {
+      mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+      audioChunks = []
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          audioChunks.push(e.data)
+        }
+      }
+
+      mediaRecorder.onstop = () => {
+        stream.getTracks().forEach(track => track.stop())
+        sendAudio()
+      }
+
+      mediaRecorder.start()
+      emit('update:isListening', true)
+    })
+    .catch(err => {
+      console.error('Microphone access denied:', err)
+    })
 }
 
-function stopListening() {
-  recognition?.stop()
-  recognition = null
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop()
+    emit('update:isListening', false)
+  }
 }
 
-onUnmounted(() => stopListening())
+function sendAudio() {
+  if (audioChunks.length === 0) return
+
+  const audioBlob = new Blob(audioChunks, { type: 'audio/webm' })
+  const reader = new FileReader()
+
+  reader.onloadend = () => {
+    const base64 = reader.result.split(',')[1]
+    if (base64) {
+      window.__sendAudioToWS?.(base64, 'webm')
+    }
+  }
+
+  reader.readAsDataURL(audioBlob)
+}
+
+onUnmounted(() => {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop()
+  }
+})
 </script>
 
 <style scoped>
@@ -70,6 +107,7 @@ onUnmounted(() => stopListening())
   transition: all 0.25s;
   position: relative;
   flex-shrink: 0;
+  user-select: none;
 }
 
 .voice-btn:hover {

@@ -141,10 +141,11 @@ Jarvis-AI/
 │   ├── src/
 │   │   ├── App.vue           # Main UI
 │   │   ├── components/
-│   │   │   ├── ChatWindow.vue
+│   │   │   ├── ChatMessage.vue
 │   │   │   └── VoiceButton.vue
 │   │   └── stores/jarvis.js
 │   ├── electron.js           # Electron desktop wrapper
+│   ├── preload.js            # Electron preload script
 │   ├── vite.config.js
 │   └── package.json
 ├── .env.example

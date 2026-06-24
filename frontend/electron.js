@@ -5,8 +5,11 @@ const fs = require('fs')
 let mainWindow
 let tray
 let isQuitting = false
+let backendPid = null
 
 const CONFIG_PATH = path.join(app.getPath('userData'), 'config.json')
+const PROJECT_ROOT = path.join(__dirname, '..', '..', '..')
+const PID_PATH = path.join(PROJECT_ROOT, 'backend', 'backend.pid')
 
 function loadConfig() {
   try {
@@ -31,8 +34,9 @@ function createWindow() {
     titleBarStyle: 'hidden',
     backgroundColor: '#0a0a0f',
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js')
     },
     icon: getIconPath(),
     show: false
@@ -125,16 +129,31 @@ function createTray() {
 
 function restartBackend() {
   const { exec } = require('child_process')
-  const backendPath = path.join(__dirname, '..', 'backend')
+  const backendPath = path.join(PROJECT_ROOT, 'backend')
 
-  exec('taskkill /IM python.exe /F', () => {
-    setTimeout(() => {
-      exec('cd /d "' + backendPath + '" && venv\\Scripts\\activate && start python main.py', (err) => {
-        if (err) console.error('Backend restart error:', err)
-        else console.log('Backend restarted')
-      })
-    }, 1000)
-  })
+  if (backendPid) {
+    try {
+      process.kill(backendPid)
+    } catch (e) {}
+    backendPid = null
+  }
+
+  try {
+    if (fs.existsSync(PID_PATH)) {
+      const pid = parseInt(fs.readFileSync(PID_PATH, 'utf8').trim(), 10)
+      if (!isNaN(pid)) {
+        try { process.kill(pid) } catch (e) {}
+      }
+      fs.unlinkSync(PID_PATH)
+    }
+  } catch (e) {}
+
+  setTimeout(() => {
+    exec('cd /d "' + backendPath + '" && venv\\Scripts\\activate && start python main.py', (err) => {
+      if (err) console.error('Backend restart error:', err)
+      else console.log('Backend restarted')
+    })
+  }, 1000)
 }
 
 app.whenReady().then(() => {
@@ -176,6 +195,31 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll()
 })
 
+ipcMain.handle('window-minimize', () => mainWindow && mainWindow.minimize())
+ipcMain.handle('window-maximize', () => {
+  if (mainWindow) {
+    mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize()
+  }
+})
+ipcMain.handle('window-close', () => mainWindow && mainWindow.hide())
 ipcMain.handle('get-config', () => loadConfig())
 ipcMain.handle('save-config', (event, config) => saveConfig(config))
 ipcMain.handle('restart-backend', () => restartBackend())
+ipcMain.handle('get-token', () => {
+  const possiblePaths = [
+    path.join(__dirname, '..', '..', '..', 'backend', '.ws_token'),
+    path.join(__dirname, '..', 'backend', '.ws_token'),
+    path.join(process.cwd(), '..', 'backend', '.ws_token')
+  ]
+  for (const tokenPath of possiblePaths) {
+    try {
+      if (fs.existsSync(tokenPath)) {
+        const token = fs.readFileSync(tokenPath, 'utf8').trim()
+        console.log('[TOKEN] Read from:', tokenPath)
+        return token
+      }
+    } catch (e) {}
+  }
+  console.error('[TOKEN] No .ws_token file found in any of:', possiblePaths)
+  return null
+})

@@ -50,13 +50,14 @@
       </div>
     </header>
 
-    <main class="chat-container" ref="chatContainer">
+    <main class="chat-container" ref="chatContainer" @scroll="checkScroll">
       <div class="chat-messages">
         <TransitionGroup name="msg">
           <ChatMessage
             v-for="(msg, index) in messages"
             :key="msg.timestamp.getTime()"
             :message="msg"
+            @delete="store.removeMessage"
           />
         </TransitionGroup>
 
@@ -73,13 +74,19 @@
           </div>
         </div>
       </div>
+
+      <button v-if="showScrollBtn" class="scroll-btn" @click="scrollToBottom">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 5v14M5 12l7 7 7-7"/>
+        </svg>
+      </button>
     </main>
 
     <footer class="app-footer">
       <div class="input-wrapper">
         <VoiceButton
           @voice-input="handleVoiceInput"
-          :is-listening="isListening"
+          v-model:is-listening="isListening"
         />
         <input
           ref="inputField"
@@ -109,30 +116,37 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
+import { useJarvisStore } from './stores/jarvis'
 import ChatMessage from './components/ChatMessage.vue'
 import VoiceButton from './components/VoiceButton.vue'
 
+const store = useJarvisStore()
 const inputText = ref('')
-const messages = ref([])
-const isTyping = ref(false)
 const isListening = ref(false)
-const isConnected = ref(false)
-const connectionStatus = ref('disconnected')
-const connectionStatusText = ref('Disconnected')
-const isElectron = ref(typeof window !== 'undefined' && window.process && window.process.type === 'electron')
+const isElectron = ref(typeof window !== 'undefined' && !!window.electronAPI)
 const chatContainer = ref(null)
 const inputField = ref(null)
+const showScrollBtn = ref(false)
+
+const messages = computed(() => store.messages)
+const isTyping = computed(() => store.isTyping)
+const isConnected = computed(() => store.isConnected)
+const connectionStatus = computed(() => store.connectionStatus)
+const connectionStatusText = computed(() => store.connectionStatusText)
 
 let ws = null
 let reconnectTimer = null
 let welcomeShown = false
+let streamBuffer = {}
+let streamMsgId = null
 
 onMounted(() => {
   connectWebSocket()
   if ('Notification' in window && Notification.permission === 'default') {
     Notification.requestPermission()
   }
+  window.__sendAudioToWS = sendAudioToWS
 })
 
 onUnmounted(() => {
@@ -143,18 +157,18 @@ onUnmounted(() => {
 function connectWebSocket() {
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return
 
-  ws = new WebSocket('ws://localhost:8765')
+  const port = import.meta.env.VITE_WS_PORT || 8765
+  ws = new WebSocket(`ws://localhost:${port}`)
 
   ws.onopen = () => {
-    isConnected.value = true
-    connectionStatus.value = 'connected'
-    connectionStatusText.value = 'Online'
+    store.isConnected = true
+    store.connectionStatus = 'connected'
+    store.connectionStatusText = 'Online'
     if (!welcomeShown) {
       welcomeShown = true
-      messages.value.push({
+      store.addMessage({
         role: 'assistant',
-        content: 'Hello! I am **Jarvis**, your AI assistant. I can control your computer, search the web, remember things, and more. How can I help?',
-        timestamp: new Date()
+        content: 'Hello! I am **Jarvis**, your AI assistant. I can control your computer, search the web, remember things, and more. How can I help?'
       })
     }
   }
@@ -168,21 +182,19 @@ function connectWebSocket() {
   }
 
   ws.onclose = () => {
-    isConnected.value = false
-    connectionStatus.value = 'disconnected'
-    connectionStatusText.value = 'Offline'
+    store.isConnected = false
+    store.connectionStatus = 'disconnected'
+    store.connectionStatusText = 'Offline'
     reconnectTimer = setTimeout(connectWebSocket, 3000)
   }
 
   ws.onerror = () => {
-    connectionStatus.value = 'error'
-    connectionStatusText.value = 'Error'
+    store.connectionStatus = 'error'
+    store.connectionStatusText = 'Error'
   }
 }
 
 function handleServerMessage(data) {
-  isTyping.value = false
-
   if (data.type === 'status') return
 
   const scrollDown = () => {
@@ -193,12 +205,53 @@ function handleServerMessage(data) {
     })
   }
 
-  if (data.type === 'response') {
+  if (data.type === 'stream_start') {
+    store.isTyping = false
+    streamMsgId = data.id
+    streamBuffer[data.id] = ''
+    store.addMessage({ role: 'assistant', content: '' })
+    scrollDown()
+  } else if (data.type === 'stream_chunk') {
+    if (streamBuffer[data.id] !== undefined) {
+      streamBuffer[data.id] += data.delta
+      const msgs = store.messages
+      if (msgs.length > 0) {
+        msgs[msgs.length - 1].content = streamBuffer[data.id]
+      }
+      scrollDown()
+    }
+  } else if (data.type === 'stream_end') {
+    const id = data.id
+    const content = streamBuffer[id] || ''
+    delete streamBuffer[id]
+    streamMsgId = null
+
+    if (data.error) {
+      const msgs = store.messages
+      if (msgs.length > 0) {
+        msgs[msgs.length - 1].role = 'error'
+        msgs[msgs.length - 1].content = data.error
+      }
+    } else if (data.message) {
+      const msgs = store.messages
+      if (msgs.length > 0) {
+        msgs[msgs.length - 1].content = data.message
+      }
+      store.saveToStorage && store.saveToStorage()
+    } else if (data.action) {
+      const msgs = store.messages
+      if (msgs.length > 0) {
+        msgs[msgs.length - 1].content = `Executing: ${data.action.action}...`
+      }
+      executeAction(data.action)
+    }
+    scrollDown()
+  } else if (data.type === 'response') {
+    store.isTyping = false
     const isBg = data.background === true
-    messages.value.push({
+    store.addMessage({
       role: isBg ? 'notification' : 'assistant',
       content: data.message,
-      timestamp: new Date(),
       isBackground: isBg
     })
     scrollDown()
@@ -206,42 +259,57 @@ function handleServerMessage(data) {
       new Notification('Jarvis', { body: data.message.substring(0, 200) })
     }
   } else if (data.type === 'reminder') {
-    messages.value.push({
+    store.isTyping = false
+    store.addMessage({
       role: 'reminder',
-      content: data.message,
-      timestamp: new Date()
+      content: data.message
     })
     scrollDown()
     if (Notification.permission === 'granted') {
       new Notification('Jarvis Reminder', { body: data.message })
     }
   } else if (data.type === 'action_result') {
+    store.isTyping = false
     const r = data.result
     let display = r.analysis || r.message || (r.facts ? r.facts.map(f => `${f.key}: ${f.value}`).join('\n') : '') || (r.success ? 'Done' : `Error: ${r.error}`)
-    messages.value.push({ role: 'system', content: display, timestamp: new Date() })
+    store.addMessage({ role: 'system', content: display })
     scrollDown()
   } else if (data.type === 'error') {
-    messages.value.push({ role: 'error', content: data.message, timestamp: new Date() })
+    store.isTyping = false
+    store.addMessage({ role: 'error', content: data.message })
     scrollDown()
+  } else if (data.type === 'transcription') {
+    if (data.success && data.text) {
+      inputText.value = data.text
+    }
   }
 }
 
 function sendMessage() {
   if (!inputText.value.trim() || !ws || ws.readyState !== WebSocket.OPEN) return
 
-  messages.value.push({
+  store.addMessage({
     role: 'user',
-    content: inputText.value,
-    timestamp: new Date()
+    content: inputText.value
   })
 
-  ws.send(JSON.stringify({ type: 'chat', content: inputText.value }))
+  ws.send(JSON.stringify({ type: 'chat', content: inputText.value, stream: true }))
   inputText.value = ''
-  isTyping.value = true
+  store.isTyping = true
+}
+
+function executeAction(action) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return
+  ws.send(JSON.stringify({ type: 'chat', content: `Execute action: ${JSON.stringify(action)}`, stream: false }))
+}
+
+function sendAudioToWS(base64Audio, format) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return
+  ws.send(JSON.stringify({ type: 'audio_transcribe', audio: base64Audio, format }))
 }
 
 function clearChat() {
-  messages.value = []
+  store.clearMessages()
 }
 
 function handleVoiceInput(transcript) {
@@ -249,9 +317,26 @@ function handleVoiceInput(transcript) {
   sendMessage()
 }
 
-function minimizeWindow() { window.require?.('electron')?.remote?.getCurrentWindow()?.minimize() }
-function maximizeWindow() { const w = window.require?.('electron')?.remote?.getCurrentWindow(); w && (w.isMaximized() ? w.unmaximize() : w.maximize()) }
-function closeWindow() { window.require?.('electron')?.remote?.getCurrentWindow()?.hide() }
+function handleTranscription(data) {
+  if (data.success && data.text) {
+    inputText.value = data.text
+  }
+}
+
+function checkScroll() {
+  if (!chatContainer.value) return
+  const { scrollTop, scrollHeight, clientHeight } = chatContainer.value
+  showScrollBtn.value = scrollHeight - scrollTop - clientHeight > 200
+}
+
+function scrollToBottom() {
+  if (!chatContainer.value) return
+  chatContainer.value.scrollTo({ top: chatContainer.value.scrollHeight, behavior: 'smooth' })
+}
+
+function minimizeWindow() { window.electronAPI?.minimize() }
+function maximizeWindow() { window.electronAPI?.maximize() }
+function closeWindow() { window.electronAPI?.close() }
 </script>
 
 <style scoped>
@@ -591,4 +676,29 @@ function closeWindow() { window.require?.('electron')?.remote?.getCurrentWindow(
 }
 
 .msg-enter-active { animation: slideUp 0.3s ease; }
+
+.scroll-btn {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 212, 255, 0.3);
+  background: rgba(10, 11, 16, 0.9);
+  backdrop-filter: blur(10px);
+  color: #00d4ff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  z-index: 5;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.scroll-btn:hover {
+  background: rgba(0, 212, 255, 0.15);
+  transform: scale(1.1);
+}
 </style>

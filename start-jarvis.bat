@@ -2,7 +2,7 @@
 echo Starting Jarvis AI Assistant...
 echo.
 
-set JARVIS_ROOT=D:\GitHub\test\jarvis
+set JARVIS_ROOT=%~dp0
 
 echo [1/2] Starting Backend...
 cd /d "%JARVIS_ROOT%\backend"

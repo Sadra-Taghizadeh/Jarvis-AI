@@ -14,7 +14,7 @@ class AIBrain:
             api_key=api_key,
             base_url=base_url
         )
-        self.model = os.getenv("AI_MODEL", "openai/gpt-4o-mini")
+        self.model = os.getenv("AI_MODEL", "deepseek-v4-flash-free")
         print(f"[AI_INIT] Model: {self.model} | Base URL: {base_url}")
 
         self.system_prompt = """You are Jarvis, an AI assistant that controls the user's computer and remembers things.
@@ -127,6 +127,66 @@ CRITICAL RULES:
         except Exception as e:
             print(f"[AI_CHAT] ERROR: {e}")
             return {"type": "error", "message": str(e)}
+
+    def chat_stream(self, user_message: str, memory=None):
+        clean_msg = self._clean_message(user_message)
+        if not clean_msg:
+            yield {"type": "chunk", "content": "I didn't catch that. Could you repeat?"}
+            return
+
+        self.conversation_history.append({"role": "user", "content": clean_msg})
+
+        if len(self.conversation_history) > 20:
+            self.conversation_history = self.conversation_history[-20:]
+
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+        ]
+
+        if memory:
+            facts = memory.get_facts()
+            if facts:
+                facts_text = "\n".join([f"- {f['key']}: {f['value']}" for f in facts[-20:]])
+                messages.append({"role": "system", "content": f"Things the user told you to remember:\n{facts_text}"})
+
+            recent = memory.get_recent_conversations(5)
+            if recent:
+                clean_history = []
+                for r in recent:
+                    clean_history.append(f"User: {self._clean_message(r['user'])}\nJarvis: {self._clean_message(r['assistant'][:100])}")
+                history_text = "\n".join(clean_history)
+                messages.append({"role": "system", "content": f"Recent conversation history:\n{history_text}"})
+
+        messages.extend(self.conversation_history)
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=8192,
+                stream=True
+            )
+
+            full_response = ""
+            for chunk in response:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_response += content
+                    yield {"type": "chunk", "content": content}
+
+            assistant_message = self._clean_message(full_response)
+            if not assistant_message or not assistant_message.strip():
+                assistant_message = "I'm not sure how to respond to that. Could you rephrase?"
+
+            self.conversation_history.append({"role": "assistant", "content": assistant_message})
+
+            parsed = self._parse_response(assistant_message)
+            yield {"type": "done", "result": parsed}
+
+        except Exception as e:
+            print(f"[AI_CHAT_STREAM] ERROR: {e}")
+            yield {"type": "error", "message": str(e)}
 
     def _parse_response(self, message: str) -> dict:
         import re

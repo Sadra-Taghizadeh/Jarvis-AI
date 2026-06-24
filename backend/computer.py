@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import platform
 import time
@@ -6,11 +7,55 @@ import tempfile
 import pyautogui
 import psutil
 
+ALLOWED_COMMANDS = {"dir", "echo", "python", "pip", "where", "systeminfo", "ipconfig", "ipconfig /all", "hostname", "whoami", "date", "time"}
+BLOCKED_PATTERNS = re.compile(r"(rm |format |del |shutdown|taskkill|[|]|&&|\|\||;)", re.IGNORECASE)
+
 class ComputerController:
     def __init__(self):
         self.system = platform.system()
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0.1
+
+    def _validate_path(self, path: str) -> bool:
+        try:
+            resolved = os.path.realpath(os.path.expanduser(path))
+            home = os.path.expanduser("~")
+            allowed_dirs = [
+                os.path.join(home, "Desktop"),
+                os.path.join(home, "Documents"),
+                os.path.join(home, "Downloads"),
+                os.path.join(home, "Pictures"),
+                os.path.join(home, "Music"),
+                os.path.join(home, "Videos"),
+                tempfile.gettempdir(),
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory"),
+            ]
+            return any(resolved.startswith(allowed) for allowed in allowed_dirs)
+        except Exception:
+            return False
+
+    def _find_browser(self) -> str:
+        if self.system == "Windows":
+            paths = [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            ]
+            for p in paths:
+                if os.path.exists(p):
+                    return p
+        elif self.system == "Darwin":
+            path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            if os.path.exists(path):
+                return path
+        else:
+            for name in ["google-chrome", "chromium-browser", "chromium"]:
+                try:
+                    result = subprocess.run(["which", name], capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0 and result.stdout.strip():
+                        return result.stdout.strip()
+                except Exception:
+                    pass
+        return ""
 
     def execute(self, action: dict) -> dict:
         action_type = action.get("action")
@@ -92,14 +137,19 @@ class ComputerController:
 
         if app_lower in ["chrome", "google chrome", "firefox", "edge", "brave"]:
             try:
-                subprocess.Popen([exe, "--new-window"], shell=True)
+                subprocess.Popen([exe, "--new-window"])
                 time.sleep(2)
                 return {"success": True, "message": f"Opened {app}"}
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
         try:
-            subprocess.Popen([exe], shell=True)
+            if self.system == "Darwin":
+                subprocess.Popen(["open", "-a", app])
+            elif self.system == "Linux":
+                subprocess.Popen([exe])
+            else:
+                subprocess.Popen([exe])
             time.sleep(1.5)
             self._focus_window_by_title(app_lower)
             return {"success": True, "message": f"Opened {app}"}
@@ -121,7 +171,7 @@ class ComputerController:
                         time.sleep(0.3)
                         print(f"[FOCUS] Focused: '{w.title}'")
                         return
-                    except:
+                    except Exception:
                         pass
             print(f"[FOCUS] Window not found for '{app_name}'")
         except Exception as e:
@@ -153,12 +203,17 @@ class ComputerController:
         app = action.get("app", "notepad")
         file_path = action.get("path", os.path.join(tempfile.gettempdir(), "jarvis_output.txt"))
 
+        if not self._validate_path(file_path):
+            return {"success": False, "error": "Path not allowed"}
+
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(text)
 
             if app.lower() == "notepad":
-                subprocess.Popen(["notepad.exe", file_path], shell=True)
+                subprocess.Popen(["notepad.exe", file_path])
+            elif self.system == "Darwin":
+                subprocess.Popen(["open", file_path])
             else:
                 os.startfile(file_path)
 
@@ -170,16 +225,18 @@ class ComputerController:
     def _google_search(self, action: dict) -> dict:
         query = action.get("query", "")
         try:
-            url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
-            chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-            if os.path.exists(chrome_path):
-                subprocess.Popen([chrome_path, url], shell=True)
+            import urllib.parse
+            url = f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
+            chrome_path = self._find_browser()
+            if chrome_path:
+                subprocess.Popen([chrome_path, url])
             else:
-                chrome_path = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-                if os.path.exists(chrome_path):
-                    subprocess.Popen([chrome_path, url], shell=True)
-                else:
+                if self.system == "Windows":
                     os.startfile(url)
+                elif self.system == "Darwin":
+                    subprocess.Popen(["open", url])
+                else:
+                    subprocess.Popen(["xdg-open", url])
             return {"success": True, "message": f"Searching Google for: {query}"}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -218,6 +275,10 @@ class ComputerController:
         try:
             if self.system == "Windows":
                 subprocess.run(["taskkill", "/IM", f"{app}.exe", "/F"], capture_output=True)
+            elif self.system == "Darwin":
+                subprocess.run(["pkill", "-f", app], capture_output=True)
+            else:
+                subprocess.run(["killall", app], capture_output=True)
             return {"success": True, "message": f"Closed {app}"}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -232,12 +293,9 @@ class ComputerController:
 
     def _screenshot(self, action: dict) -> dict:
         try:
-            import pyautogui
-            from PIL import Image
             screenshot = pyautogui.screenshot()
             path = action.get("path", "")
             if not path:
-                import tempfile
                 path = os.path.join(tempfile.gettempdir(), "jarvis_screenshot.png")
             screenshot.save(path)
             return {"success": True, "message": f"Screenshot saved to {path}", "path": path}
@@ -258,7 +316,6 @@ class ComputerController:
 
     def _save_screenshot_to_desktop(self, action: dict) -> dict:
         try:
-            import pyautogui
             desktop = os.path.join(os.path.expanduser("~"), "Desktop")
             filename = action.get("filename", "screenshot.png")
             filepath = os.path.join(desktop, filename)
@@ -277,6 +334,9 @@ class ComputerController:
         path = action.get("path", "")
         content = action.get("content", "")
 
+        if not self._validate_path(path):
+            return {"success": False, "error": "Path not allowed"}
+
         try:
             if operation == "read":
                 with open(path, "r", encoding="utf-8") as f:
@@ -293,16 +353,18 @@ class ComputerController:
                 return {"success": True, "files": os.listdir(path)}
         except Exception as e:
             return {"success": False, "error": str(e)}
+        return {"success": False, "error": f"Unknown operation: {operation}"}
 
     def _system_info(self, action: dict) -> dict:
         try:
+            disk_path = "C:\\" if self.system == "Windows" else "/"
             info = {
                 "system": platform.system(),
                 "release": platform.release(),
                 "processor": platform.processor(),
                 "cpu_percent": psutil.cpu_percent(),
                 "memory_percent": psutil.virtual_memory().percent,
-                "disk_usage": psutil.disk_usage('C:\\').percent if platform.system() == "Windows" else psutil.disk_usage('/').percent,
+                "disk_usage": psutil.disk_usage(disk_path).percent,
             }
             return {"success": True, "info": info}
         except Exception as e:
@@ -327,7 +389,7 @@ class ComputerController:
             return {"success": False, "error": str(e)}
 
     def _wait(self, action: dict) -> dict:
-        seconds = action.get("seconds", 1)
+        seconds = min(action.get("seconds", 1), 30)
         time.sleep(seconds)
         return {"success": True, "message": f"Waited {seconds} seconds"}
 
@@ -335,7 +397,9 @@ class ComputerController:
         try:
             if self.system == "Windows":
                 pyautogui.hotkey("alt", "tab")
-                time.sleep(0.5)
+            elif self.system == "Darwin":
+                subprocess.run(["osascript", "-e", 'tell application "System Events" to keystroke tab using {command down}'], capture_output=True)
+            time.sleep(0.5)
             return {"success": True, "message": "Switched window"}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -343,20 +407,32 @@ class ComputerController:
     def _open_url(self, action: dict) -> dict:
         url = action.get("url", "")
         try:
-            if self.system == "Windows":
-                chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-                if os.path.exists(chrome_path):
-                    subprocess.Popen([chrome_path, url], shell=True)
-                else:
-                    os.startfile(url)
+            chrome_path = self._find_browser()
+            if chrome_path:
+                subprocess.Popen([chrome_path, url])
+            elif self.system == "Windows":
+                os.startfile(url)
+            elif self.system == "Darwin":
+                subprocess.Popen(["open", url])
+            else:
+                subprocess.Popen(["xdg-open", url])
             return {"success": True, "message": f"Opened URL: {url}"}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     def _run_command(self, action: dict) -> dict:
         command = action.get("command", "")
+        cmd_lower = command.lower().strip()
+
+        if BLOCKED_PATTERNS.search(command):
+            return {"success": False, "error": "Command contains blocked patterns"}
+
+        base_cmd = cmd_lower.split()[0] if cmd_lower.split() else ""
+        if base_cmd not in ALLOWED_COMMANDS:
+            return {"success": False, "error": f"Command '{base_cmd}' is not in the allowlist"}
+
         try:
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(command, shell=False, capture_output=True, text=True, timeout=30)
             return {"success": True, "output": result.stdout, "error_output": result.stderr}
         except Exception as e:
             return {"success": False, "error": str(e)}

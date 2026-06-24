@@ -21,9 +21,13 @@ class Memory:
             if os.path.exists(filepath):
                 with open(filepath, "r", encoding="utf-8") as f:
                     return json.load(f)
-        except:
+        except (json.JSONDecodeError, IOError):
             pass
         return []
+
+    def clear_conversations(self):
+        self.conversations = []
+        self._save(self.conversation_file, self.conversations)
 
     def _save(self, filepath, data):
         with open(filepath, "w", encoding="utf-8") as f:
